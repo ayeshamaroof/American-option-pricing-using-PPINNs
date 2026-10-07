@@ -1,3 +1,5 @@
+
+
 #configuration and setup
 
 from tensorflow.python.ops.gen_array_ops import TV_MatrixDiag_T
@@ -46,6 +48,85 @@ def exact_solution(x,sigma,r ,t): #for result evaluation
     call = x * si.norm.cdf(d1, 0.0, 1.0) - K * np.exp(-r * tau) * si.norm.cdf(d2, 0.0, 1.0)
     return call
 
+def MC_call(S0, sigma, r, T, K=1,
+                             steps=50,
+                             paths=100000,
+                             seed=42):
+
+    # Force Python floats
+    S0, sigma, r, T = map(float, [S0, sigma, r, T])
+
+    today = ql.Date.todaysDate()
+    ql.Settings.instance().evaluationDate = today
+
+    day_count = ql.Actual365Fixed()
+    calendar = ql.NullCalendar()
+    maturity_date = today + int(T * 365)
+
+    payoff = ql.PlainVanillaPayoff(ql.Option.Call, K)
+    exercise = ql.AmericanExercise(today, maturity_date)
+    option = ql.VanillaOption(payoff, exercise)
+
+    spot = ql.QuoteHandle(ql.SimpleQuote(S0))
+    rate = ql.YieldTermStructureHandle(
+        ql.FlatForward(today, r, day_count)
+    )
+    vol = ql.BlackVolTermStructureHandle(
+        ql.BlackConstantVol(today, calendar, sigma, day_count)
+    )
+
+    process = ql.BlackScholesProcess(spot, rate, vol)
+
+    engine = ql.MCAmericanEngine(
+        process,
+        "PseudoRandom",
+        timeSteps=steps,
+        requiredSamples=paths,
+        seed=seed
+    )
+
+    option.setPricingEngine(engine)
+
+    return option.NPV()
+
+
+def FD_call(S0, sigma, r, T, K=1, grid_size=400):
+
+    S0, sigma, r, T = map(float, [S0, sigma, r, T])
+
+    ql.Settings.instance().evaluationDate = ql.Date.todaysDate()
+
+    day_count = ql.Actual365Fixed()
+    calendar = ql.NullCalendar()
+    maturity_date = ql.Settings.instance().evaluationDate + int(T * 365)
+
+    payoff = ql.PlainVanillaPayoff(ql.Option.Call, K)
+    exercise = ql.AmericanExercise(
+        ql.Settings.instance().evaluationDate,
+        maturity_date
+    )
+
+    option = ql.VanillaOption(payoff, exercise)
+
+    spot = ql.QuoteHandle(ql.SimpleQuote(S0))
+    rate = ql.YieldTermStructureHandle(
+        ql.FlatForward(0, calendar, r, day_count)
+    )
+    vol = ql.BlackVolTermStructureHandle(
+        ql.BlackConstantVol(0, calendar, sigma, day_count)
+    )
+
+    process = ql.BlackScholesProcess(spot, rate, vol)
+
+    # grid is controlled externally to accomodate same code for different step sizes
+    engine = ql.FdBlackScholesVanillaEngine(
+        process, grid_size, grid_size
+    )
+
+    option.setPricingEngine(engine)
+
+    return option.NPV()
+
 
 def evaluate_against_exact(estimator_func, exact_func,
                            N_pool=130000, N_eval=100000, K=1,
@@ -56,7 +137,7 @@ def evaluate_against_exact(estimator_func, exact_func,
     if seed is not None:
         np.random.seed(seed)
 
-    # gen dataset for error comparison, we are generating more than required so that we still 
+    # gen dataset for error comparison, we are generating more than required so that we still
     #have same data set size even after dropping. better to report in paper
     geom = dde.geometry.geometry_3d.Cuboid(xmin=xmin, xmax=xmax)
     timedomain = dde.geometry.TimeDomain(0, 1)
@@ -75,7 +156,7 @@ def evaluate_against_exact(estimator_func, exact_func,
     avg_time_exact = (end - start) / N_pool
     print(f"[Exact] Average computation time per option: {avg_time_exact*1e6:.2f} μs")
 
-    # Filter  
+    # Filter
     mask = y_exact_pool > threshold
     n_valid = int(mask.sum())
     print(f"Pool: {N_pool}, valid after filtering: {n_valid}, dropped: {N_pool - n_valid}")
@@ -99,7 +180,7 @@ def evaluate_against_exact(estimator_func, exact_func,
     avg_time_est = (end - start) / N_eval
     print(f"[{label}] Average computation time per option: {avg_time_est*1e6:.2f} μs")
 
-    # Metrics 
+    # Metrics
     mse = dde.metrics.mean_squared_error(y_exact_f, y_est_f)
     rmse = np.sqrt(mse)
     mape = dde.metrics.mean_absolute_percentage_error(y_exact_f, y_est_f)
@@ -216,7 +297,7 @@ def main():
 
     ic = dde.IC(geomtime, func, lambda _, on_initial: on_initial)
 
-    
+
     bc=[ic,bc1,bcs1,bcr1] #,bcs2,bcr2,bc2]
 
     # following is the extra collocation points
@@ -251,8 +332,8 @@ def main():
     # train_state.best_y = train_state.best_y.reshape(-1, 1)
     dde.saveplot(losshistory, train_state, issave=True, isplot=True)
 
-      ################## end of hybrid ppinn block#######################
-    #############comparison  #########################################
+           ################## end of hybrid ppinn block#######################
+    #############comparison. global / full domain metrics  #########################################
     ###################################################
 
     # PPINN wrapper
@@ -261,7 +342,7 @@ def main():
     evaluate_against_exact(pinn_wrapper, exact_solution, label="PINN")
 
 
-###################### plots#########################
+###################### plots global full domain#########################
 #################### PRICE vs STOCK  ############################
     # Number of points in each dimension:
     sigmas = [0.2, 0.3, 1]
@@ -406,7 +487,7 @@ def main():
 
         y_predt = model.predict(x_test_new)
 
-        ax = axes[col]   # 1D indexing
+        ax = axes[col]   
 
         ax.plot(t2, vn * K1, 'b-', linewidth=2)
         ax.plot(t2, y_predt * K1, 'r--', linewidth=2)
@@ -423,7 +504,210 @@ def main():
     plt.savefig("option_price_vs_time_sigma_r_grid.png", dpi=600, bbox_inches='tight')
     plt.show()
         #########################################
-  
+
+    ################## Moneyness evaluation ############################
+    # GRID EVALUATION (PPINN, MC, FD200, FD400)
+    # SEPARATE RUN FOR EACH STOCK
+    
+
+    r_values = [0.03, 0.15, 0.3]
+    sigma_values = [0.15, 0.3, 0.6, 1]
+
+    S_values = [0.9, 1.0, 1.1]
+    T_fixed = 1.0
+
+
+    for S_fixed in S_values:
+
+        print(f"\n\n################ STOCK PRICE S = {S_fixed} ################\n")
+
+        results = []
+
+        pinn_times = []
+        mc_times = []
+        fd200_times = []
+        fd400_times = []
+
+        for r_val in r_values:
+            for sigma_val in sigma_values:
+
+                #  Exact 
+                exact_price = exact_solution(S_fixed, sigma_val, r_val, T_fixed)
+
+                #  PPINN 
+                start = tm.time()
+                pinn_price = model.predict(
+                    np.array([[S_fixed, sigma_val, r_val, T_fixed]])
+                )[0, 0]
+                pinn_times.append(tm.time() - start)
+
+                pinn_error = pinn_price - exact_price
+                pinn_pct = 100 * pinn_error / exact_price if abs(exact_price) > 1e-12 else 0.0
+
+                #  FD 200
+                start = tm.time()
+                fd200_price = FD_call(
+                    S_fixed, sigma_val, r_val, T_fixed,
+                    K=K, grid_size=200
+                )
+                fd200_times.append(tm.time() - start)
+
+                fd200_error = fd200_price - exact_price
+                fd200_pct = 100 * fd200_error / exact_price if abs(exact_price) > 1e-12 else 0.0
+
+                #  FD 400 
+                start = tm.time()
+                fd400_price = FD_call(
+                    S_fixed, sigma_val, r_val, T_fixed,
+                    K=K, grid_size=400
+                )
+                fd400_times.append(tm.time() - start)
+
+                fd400_error = fd400_price - exact_price
+                fd400_pct = 100 * fd400_error / exact_price if abs(exact_price) > 1e-12 else 0.0
+
+                #  Monte Carlo 
+                start = tm.time()
+                mc_price = MC_call(S_fixed, sigma_val, r_val, T_fixed)
+                mc_times.append(tm.time() - start)
+
+                mc_error = mc_price - exact_price
+                mc_pct = 100 * mc_error / exact_price if abs(exact_price) > 1e-12 else 0.0
+
+                results.append([
+                    r_val, sigma_val, exact_price,
+                    pinn_price, pinn_error, pinn_pct,
+                    fd200_price, fd200_error, fd200_pct,
+                    fd400_price, fd400_error, fd400_pct,
+                    mc_price, mc_error, mc_pct
+                ])
+
+       
+        # Results Table (Per Stock)
+        
+
+        df_results = pd.DataFrame(results, columns=[
+            "r", "sigma", "Exact Value",
+            "PPINN Value", "PPINN Error", "PPINN % Error",
+            "FD200 Value", "FD200 Error", "FD200 % Error",
+            "FD400 Value", "FD400 Error", "FD400 % Error",
+            "MC Value", "MC Error", "MC % Error"
+        ])
+
+        print(df_results)
+
+       
+        # Metrics (Per Stock)
+      
+
+        exact_vals = df_results["Exact Value"].values
+        pinn_vals  = df_results["PPINN Value"].values
+        fd200_vals = df_results["FD200 Value"].values
+        fd400_vals = df_results["FD400 Value"].values
+        mc_vals    = df_results["MC Value"].values
+
+
+        def compute_metrics(y_true, y_pred):
+            mse  = dde.metrics.mean_squared_error(y_true, y_pred)
+            rmse=np.sqrt(mse)
+            l2   = dde.metrics.l2_relative_error(y_true, y_pred)
+            mape = dde.metrics.mean_absolute_percentage_error(y_true, y_pred)
+            r2   = r2_score(y_true, y_pred)
+            return rmse, l2, mape, r2
+
+
+        pinn_rmse, pinn_l2, pinn_mape, pinn_r2     = compute_metrics(exact_vals, pinn_vals)
+        fd200_rmse, fd200_l2, fd200_mape, fd200_r2 = compute_metrics(exact_vals, fd200_vals)
+        fd400_rmse, fd400_l2, fd400_mape, fd400_r2 = compute_metrics(exact_vals, fd400_vals)
+        mc_rmse, mc_l2, mc_mape, mc_r2             = compute_metrics(exact_vals, mc_vals)
+
+
+        metrics_table = pd.DataFrame({
+            "Model": [
+                "PPINN",
+                "Finite Difference 200x200",
+                "Finite Difference 400x400",
+                "Monte Carlo"
+            ],
+            "RMSE": [pinn_rmse, fd200_rmse, fd400_rmse, mc_rmse],
+            "L2 Relative Error": [pinn_l2, fd200_l2, fd400_l2, mc_l2],
+            "MAPE": [pinn_mape, fd200_mape, fd400_mape, mc_mape],
+            "R²": [pinn_r2, fd200_r2, fd400_r2, mc_r2],
+            "Total Time (s)": [
+                np.sum(pinn_times),
+                np.sum(fd200_times),
+                np.sum(fd400_times),
+                np.sum(mc_times)
+            ],
+            "Average Time per Option (s)": [
+                np.mean(pinn_times),
+                np.mean(fd200_times),
+                np.mean(fd400_times),
+                np.mean(mc_times)
+            ]
+        })
+
+        print("\n================ GLOBAL METRICS + TIMING ================\n")
+        print(metrics_table)
+
+      #########################################
+    # Single Contract Pricing & Timing Comparison
+    ##########################################
+    S_test = 1.0
+    sigma_test = 0.3
+    r_test = 0.1
+    T_test = 1.0
+
+    print("\nPricing contract (S, sigma, r, T) = (1, 0.3, 0.1, 1)")
+
+    #  PPINN
+    start = tm.time()
+    pinn_price = model.predict(
+        np.array([[S_test, sigma_test, r_test, T_test]])
+    )[0, 0]
+    pinn_time = tm.time() - start
+
+    print(f"\nPPINN Price = {pinn_price:.6f}")
+    print(f"PPINN pricing time = {pinn_time*1e6:.2f} μs")
+
+    #  Exact Black–Scholes 
+    start = tm.time()
+    exact_price = exact_solution(S_test, sigma_test, r_test, T_test)
+    exact_time = tm.time() - start
+
+    print(f"\nExact Black–Scholes Price = {exact_price:.6f}")
+    print(f"Exact pricing time = {exact_time*1e6:.2f} μs")
+
+    #  Monte Carlo
+    start = tm.time()
+    mc_price = MC_call(S_test, sigma_test, r_test, T_test)
+    mc_time = tm.time() - start
+
+    print(f"\nMonte Carlo Price = {mc_price:.6f}")
+    print(f"Monte Carlo pricing time = {mc_time:.6f} s")
+
+    # Finite Difference 200x200 
+    start = tm.time()
+    fd200_price = FD_call(
+        S_test, sigma_test, r_test, T_test,
+        K=K, grid_size=200
+    )
+    fd200_time = tm.time() - start
+
+    print(f"\nFinite Difference (200x200) Price = {fd200_price:.6f}")
+    print(f"FD 200x200 pricing time = {fd200_time:.6f} s")
+
+    # Finite Difference 400x400 
+    start = tm.time()
+    fd400_price = FD_call(
+        S_test, sigma_test, r_test, T_test,
+        K=K, grid_size=400
+    )
+    fd400_time = tm.time() - start
+
+    print(f"\nFinite Difference (400x400) Price = {fd400_price:.6f}")
+    print(f"FD 400x400 pricing time = {fd400_time:.6f} s")
+
 
 
 
@@ -435,7 +719,7 @@ if __name__ == "__main__":
     # Problem parameters:
     K = 1
     K1=100
-    m=0.01
+  
 
     # Generate a dataset with the exact solution (it helps keep the error metrics comparable and saves time):
     # gen_exact_solution()
