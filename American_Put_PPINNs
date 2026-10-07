@@ -71,7 +71,7 @@ def ref_solution(S0, sigma, r, T, K=1, grid_size=400): #FD using quant fin
 
     return option.NPV()
 
-def ref_solution1(S0, sigma, r, T, K=1,
+def MC_put(S0, sigma, r, T, K=1,
                              steps=50,
                              paths=100000,
                              seed=42): #MC-LSM using quant fin
@@ -180,7 +180,7 @@ def main():
     bsigma=1
     br=0.3
     m=0.0
-    ms=0.0001
+    ms=0
     xmin = [ms,m,m]
     xmax = [bstock,bsigma,br]
     geom = dde.geometry.geometry_3d.Cuboid(xmin=xmin, xmax=xmax)
@@ -189,7 +189,7 @@ def main():
     geomtime = dde.geometry.GeometryXTime(geom, timedomain)
 
 
-    bc1 = dde.DirichletBC(geomtime, func_FD, lambda x, _: np.isclose(x[0], ms))
+    bc1 = dde.DirichletBC(geomtime, func, lambda x, _: np.isclose(x[0], ms))
     bc2 = dde.DirichletBC(geomtime, func_FD, lambda x, _: np.isclose(x[0], bstock))
 
     bcs1 = dde.DirichletBC(geomtime, func_FD, lambda x, _: np.isclose(x[1], m))
@@ -248,8 +248,8 @@ def main():
     # General evaluation function
     # -------------------------------
     def evaluate_against_exact(estimator_func, exact_func,
-                               N_pool=150000, N_eval=100000, K=1,
-                               xmin=[0.0001, 0, 0], xmax=[2, 1, 0.3],
+                               N_pool=140000, N_eval=100000, K=1,
+                               xmin=[0.0, 0, 0], xmax=[2, 1, 0.3],
                                label="PINN"):
 
   
@@ -259,7 +259,7 @@ def main():
         geomtime = dde.geometry.GeometryXTime(geom, timedomain)
         X_pool = geomtime.random_points(N_pool)
 
-        # Compute ref_FD 400 prices for all 200,000 points
+        # Compute ref_FD 400 prices for all EXTRA points
         #    ONLY to identify zero-price observations
         
         y_exact_pool = np.zeros(N_pool)
@@ -549,7 +549,169 @@ def main():
     plt.savefig("option_price_vs_time_sigma_r_grid.png", dpi=600, bbox_inches='tight')
     plt.show()
         #########################################
-    #########################################
+    
+
+    # FULL GRID EVALUATION + METRICS + TIMING
+
+   #########################################################
+
+    r_values = [0.03, 0.15, 0.3]
+    sigma_values = [0.15, 0.3, 0.6, 1]
+
+    S_values = [0.9, 1.0, 1.1]
+    T_fixed = 1.0
+
+    print("\n================ ALL MODELS EVALUATION ================\n")
+
+    for S_fixed in S_values:
+
+        print(f"\n\n################ STOCK PRICE S = {S_fixed} ################\n")
+
+        results = []
+
+        pinn_times = []
+        mc_times = []
+        fd_times = []
+
+
+        for r_val in r_values:
+            for sigma_val in sigma_values:
+
+                #  Exact 
+                start = tm.time()
+                exact_price = ref_solution(S_fixed, sigma_val, r_val, T_fixed)
+                fd_times.append(tm.time() - start)
+                #  PPINN 
+                start = tm.time()
+                pinn_price = model.predict(
+                    np.array([[S_fixed, sigma_val, r_val, T_fixed]])
+                )[0, 0]
+                pinn_times.append(tm.time() - start)
+
+                pinn_error = pinn_price - exact_price
+                pinn_pct = 100 * pinn_error / exact_price if abs(exact_price) > 1e-12 else 0.0
+
+
+                # Monte Carlo 
+                start = tm.time()
+                mc_price = MC_put(S_fixed, sigma_val, r_val, T_fixed)
+                mc_times.append(tm.time() - start)
+
+                mc_error = mc_price - exact_price
+                mc_pct = 100 * mc_error / exact_price if abs(exact_price) > 1e-12 else 0.0
+
+                results.append([
+                    r_val, sigma_val, exact_price,
+                    pinn_price, pinn_error, pinn_pct,
+                    mc_price, mc_error, mc_pct
+                ])
+
+
+        # Results Table (Per Stock)
+       
+
+        df_results = pd.DataFrame(results, columns=[
+            "r", "sigma", "Exact Value",
+            "PPINN Value", "PPINN Error", "PPINN % Error",
+            "MC Value", "MC Error", "MC % Error"
+        ])
+
+      
+
+      
+        # Metrics (Per Stock)
+       
+
+        exact_vals = df_results["Exact Value"].values
+        pinn_vals  = df_results["PPINN Value"].values
+        mc_vals    = df_results["MC Value"].values
+
+
+        def compute_metrics(y_true, y_pred):
+            mse  = dde.metrics.mean_squared_error(y_true, y_pred)
+            rmse=np.sqrt(mse)
+            l2   = dde.metrics.l2_relative_error(y_true, y_pred)
+            mape = dde.metrics.mean_absolute_percentage_error(y_true, y_pred)
+            r2   = r2_score(y_true, y_pred)
+            return rmse, l2, mape, r2
+
+
+        pinn_rmse, pinn_l2, pinn_mape, pinn_r2     = compute_metrics(exact_vals, pinn_vals)
+        mc_rmse, mc_l2, mc_mape, mc_r2             = compute_metrics(exact_vals, mc_vals)
+
+
+        metrics_table = pd.DataFrame({
+            "Model": [
+                "PPINN",
+                "Monte Carlo"
+            ],
+            "RMSE": [pinn_rmse,  mc_rmse],
+            "L2 Relative Error": [pinn_l2,  mc_l2],
+            "MAPE": [pinn_mape,  mc_mape],
+            "R²": [pinn_r2,  mc_r2],
+            "Total Time (s)": [
+                np.sum(pinn_times),
+                np.sum(mc_times)
+            ],
+            "Average Time per Option (s)": [
+                np.mean(pinn_times),
+                np.mean(mc_times)
+            ]
+        })
+
+        print("average fd time is",np.mean(fd_times))
+
+        print("\n================ GLOBAL METRICS + TIMING ================\n")
+        print(metrics_table)
+
+     
+    # #############################################
+    # Single Contract Pricing & Timing Comparison
+    # ################################################
+
+    S_test = 1.0
+    sigma_test = 0.3
+    r_test = 0.1
+    T_test = 1.0
+
+    print("\nPricing contract (S, sigma, r, T) = (1, 0.3, 0.1, 1)")
+
+    # -------- PPINN --------
+    start = tm.time()
+    pinn_price = model.predict(
+        np.array([[S_test, sigma_test, r_test, T_test]])
+    )[0, 0]
+    pinn_time = tm.time() - start
+
+    print(f"\nPPINN Price = {pinn_price:.6f}")
+    print(f"PPINN pricing time = {pinn_time*1e6:.2f} μs")
+
+    # -------- FD 400 * 400 --------
+    start = tm.time()
+    exact_price = ref_solution(S_test, sigma_test, r_test, T_test)
+    exact_time = tm.time() - start
+
+    print(f"\nFd Price = {exact_price:.6f}")
+    print(f"FD pricing time = {exact_time*1e6:.2f} μs")
+
+    # -------- Monte Carlo --------
+    start = tm.time()
+    mc_price = MC_put(S_test, sigma_test, r_test, T_test)
+    mc_time = tm.time() - start
+
+    print(f"\nMonte Carlo Price = {mc_price:.6f}")
+    print(f"Monte Carlo pricing time = {mc_time:.6f} s")
+
+    #  Finite Difference 200x200 
+    start = tm.time()
+    fd200_price = ref_solution(
+        S_test, sigma_test, r_test, T_test,
+        K=K, grid_size=200
+    )
+    fd200_time = tm.time() - start
+
+    print(f"\nFinite Difference (200x200) Price = {fd200_price:.6f}")
+    print(f"FD 200x200 pricing time = {fd200_time:.6f} s")
 
 
 
